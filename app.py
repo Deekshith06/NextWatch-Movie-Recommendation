@@ -1,373 +1,593 @@
-import streamlit as st
+"""
+NextWatch — Movie Recommendation App
+Cinematic UI · Hybrid recommendation engine · Streamlit
+"""
+
+import os
 import pickle
+import urllib.parse
+from pathlib import Path
+
+import numpy as np
 import pandas as pd
 import requests
+import streamlit as st
 
-# ================== CONFIG & UI THEME ==================
-# Using your OMDB Key
+# ── Config ─────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="NextWatch", page_icon="🎬", layout="wide")
+
 try:
-    API_KEY = st.secrets["OMDB_API_KEY"]
+    API_KEY: str = st.secrets["OMDB_API_KEY"]
 except KeyError:
-    st.error("OMDB API Key not found in secrets.toml.")
+    st.error("⚠️ OMDB API Key missing from `.streamlit/secrets.toml`.")
     st.stop()
 
-st.set_page_config(page_title="NextWatch", layout="wide")
+PLACEHOLDER = "https://via.placeholder.com/300x450/0d0f14/c9a84c?text=No+Poster"
+COLS_PER_ROW = 5
 
+# ── CSS ─────────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-    /* Global Styles */
-    .main { 
-        background-color: #0d1117; 
-        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-    }
-    
-    /* Clean Grid Spacing */
-    .stColumn {
-        padding-left: 0.5rem !important;
-        padding-right: 0.5rem !important;
-    }
-    
-    /* Movie Card - Poster Only */
-    .movie-card {
-        background-color: transparent;
-        border: none;
-        box-shadow: none;
-        overflow: visible;
-        height: auto;
-        display: flex;
-        flex-direction: column;
-        margin-bottom: 2rem;
-        cursor: pointer;
-        transition: transform 0.3s ease;
-    }
-    
-    /* Hover Effect - Scale Image Only */
-    .movie-card:hover {
-        transform: translateY(-5px);
-    }
-    
-    /* Poster Image */
-    .movie-img {
-        width: 100%;
-        height: 240px;
-        border-radius: 12px;
-        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
-        object-fit: cover;
-        object-position: top center;
-        opacity: 0.95;
-        transition: opacity 0.3s ease, transform 0.3s ease, box-shadow 0.3s ease;
-        display: block;
-    }
-    
-    .movie-card:hover .movie-img {
-        opacity: 1;
-        box-shadow: 0 12px 24px rgba(0, 0, 0, 0.5);
-    }
-    
-    /* Title Section - Below Poster */
-    .movie-title {
-        height: auto;
-        min-height: 40px;
-        padding: 10px 5px 0 5px;
-        text-align: center;
-        width: 100%;
-        
-        /* Typography */
-        color: #e6edf3;
-        font-size: 14px;
-        font-weight: 500;
-        letter-spacing: 0.02em;
-        line-height: 1.4;
-        
-        /* Background Removed */
-        background: transparent;
-        border: none;
-        
-        /* Truncation */
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
-        overflow: hidden;
-    }
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700&family=DM+Sans:wght@300;400;500&display=swap');
 
-    /* Remove Link Decoration */
-    a { text-decoration: none !important; color: inherit !important; }
+/* ── Reset & Base ── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body, [data-testid="stAppViewContainer"] {
+    background: #08090a !important;
+    font-family: 'DM Sans', sans-serif;
+    color: #ede9e0;
+}
+[data-testid="stSidebar"] { background: #0d0f14 !important; border-right: 1px solid #1c1f26; }
+[data-testid="stSidebar"] * { color: #ede9e0 !important; }
 
-    /* Button Styling */
-    .stButton > button {
-        background-color: #238636;
-        color: white;
-        border: none;
-        border-radius: 6px;
-        font-weight: 600;
-        padding: 0.5rem 1rem;
-        transition: background-color 0.2s;
-    }
-    
-    .stButton > button:hover {
-        background-color: #2ea043;
-    }
-    
-    .detail-container { 
-        background: #161b22; 
-        padding: 2rem; 
-        border-radius: 12px; 
-        border: 1px solid #30363d;
-        margin-bottom: 2rem; 
-    }
+/* ── Hide Streamlit chrome ── */
+#MainMenu, footer, [data-testid="stDeployButton"] { display: none !important; }
+[data-testid="stHeader"] { background: transparent; }
+
+/* ── Masthead ── */
+.nw-masthead {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    padding: 2rem 0 0.25rem;
+    border-bottom: 1px solid #1c1f26;
+    margin-bottom: 2rem;
+}
+.nw-logo {
+    font-family: 'Playfair Display', serif;
+    font-size: 2.4rem;
+    font-weight: 700;
+    color: #c9a84c;
+    letter-spacing: -0.02em;
+    line-height: 1;
+}
+.nw-tagline {
+    font-size: 0.8rem;
+    color: #5a5a4e;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 300;
+}
+
+/* ── Section header ── */
+.nw-section {
+    font-family: 'DM Sans', sans-serif;
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: #c9a84c;
+    margin-bottom: 1.4rem;
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+}
+.nw-section::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: #1c1f26;
+}
+
+/* ── Movie Card ── */
+.nw-card {
+    display: block;
+    text-decoration: none !important;
+    color: inherit !important;
+    cursor: pointer;
+}
+.nw-card-inner {
+    position: relative;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #0d0f14;
+    transition: transform 0.28s cubic-bezier(0.34,1.56,0.64,1),
+                box-shadow 0.28s ease;
+    will-change: transform;
+}
+.nw-card:hover .nw-card-inner {
+    transform: translateY(-8px) scale(1.02);
+    box-shadow: 0 20px 40px rgba(0,0,0,0.7), 0 0 0 1px #c9a84c44;
+}
+.nw-card-inner img {
+    width: 100%;
+    aspect-ratio: 2/3;
+    object-fit: cover;
+    object-position: top center;
+    display: block;
+    transition: opacity 0.3s ease;
+    opacity: 0.88;
+}
+.nw-card:hover .nw-card-inner img { opacity: 1; }
+
+/* Gold shimmer on hover */
+.nw-card-inner::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(135deg, #c9a84c18 0%, transparent 60%);
+    opacity: 0;
+    transition: opacity 0.28s ease;
+    pointer-events: none;
+}
+.nw-card:hover .nw-card-inner::after { opacity: 1; }
+
+/* Rating badge */
+.nw-badge {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: rgba(8,9,10,0.85);
+    backdrop-filter: blur(8px);
+    border: 1px solid #c9a84c66;
+    border-radius: 4px;
+    padding: 2px 7px;
+    font-size: 0.7rem;
+    font-weight: 500;
+    color: #c9a84c;
+    letter-spacing: 0.04em;
+}
+
+/* Card title */
+.nw-card-title {
+    padding: 0.55rem 0.4rem 0.2rem;
+    font-size: 0.78rem;
+    font-weight: 400;
+    color: #b0aa9a;
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    transition: color 0.2s ease;
+}
+.nw-card:hover .nw-card-title { color: #ede9e0; }
+
+/* Stagger-reveal animation */
+@keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+.nw-grid-item {
+    animation: fadeUp 0.45s ease both;
+}
+
+/* ── Detail panel ── */
+.nw-detail {
+    background: #0d0f14;
+    border: 1px solid #1c1f26;
+    border-radius: 12px;
+    padding: 2rem;
+    margin-bottom: 2.5rem;
+    display: flex;
+    gap: 2rem;
+    position: relative;
+    overflow: hidden;
+}
+.nw-detail::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at top left, #c9a84c0a 0%, transparent 60%);
+    pointer-events: none;
+}
+.nw-detail-poster {
+    flex-shrink: 0;
+    width: 160px;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.6);
+}
+.nw-detail-poster img {
+    width: 100%;
+    display: block;
+    aspect-ratio: 2/3;
+    object-fit: cover;
+}
+.nw-detail-body { flex: 1; min-width: 0; }
+.nw-detail-title {
+    font-family: 'Playfair Display', serif;
+    font-size: 1.7rem;
+    font-weight: 700;
+    color: #ede9e0;
+    line-height: 1.15;
+    margin-bottom: 0.4rem;
+}
+.nw-detail-meta {
+    font-size: 0.75rem;
+    color: #5a5a4e;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    margin-bottom: 1rem;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+}
+.nw-chip {
+    background: #1c1f26;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 0.7rem;
+    color: #8a8478;
+}
+.nw-chip.gold { background: #c9a84c1a; color: #c9a84c; border: 1px solid #c9a84c33; }
+.nw-detail-plot {
+    font-size: 0.88rem;
+    color: #a09a8c;
+    line-height: 1.65;
+    margin-bottom: 1rem;
+}
+.nw-detail-credits {
+    font-size: 0.78rem;
+    color: #5a5a4e;
+    line-height: 1.8;
+}
+.nw-detail-credits strong { color: #8a8478; }
+
+/* ── Trailer link ── */
+.nw-trailer-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    background: #c9a84c;
+    color: #08090a !important;
+    font-weight: 600;
+    font-size: 0.8rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    padding: 0.45rem 1.1rem;
+    border-radius: 4px;
+    text-decoration: none !important;
+    transition: background 0.2s ease;
+    margin-top: 0.75rem;
+}
+.nw-trailer-btn:hover { background: #e0be6a; }
+
+/* ── Streamlit widget overrides ── */
+[data-testid="stSelectbox"] > div > div {
+    background: #0d0f14 !important;
+    border: 1px solid #1c1f26 !important;
+    border-radius: 6px !important;
+    color: #ede9e0 !important;
+    font-family: 'DM Sans', sans-serif !important;
+}
+[data-testid="stSelectbox"] label { color: #8a8478 !important; font-size: 0.78rem !important; }
+
+.stButton > button {
+    background: transparent !important;
+    color: #c9a84c !important;
+    border: 1px solid #c9a84c55 !important;
+    border-radius: 4px !important;
+    font-size: 0.75rem !important;
+    letter-spacing: 0.08em !important;
+    text-transform: uppercase !important;
+    transition: all 0.2s ease !important;
+    font-family: 'DM Sans', sans-serif !important;
+}
+.stButton > button:hover {
+    background: #c9a84c14 !important;
+    border-color: #c9a84c !important;
+}
+
+/* Sidebar number input */
+[data-testid="stNumberInput"] input {
+    background: #0d0f14 !important;
+    color: #ede9e0 !important;
+    border-color: #1c1f26 !important;
+}
+[data-testid="stNumberInput"] label { color: #8a8478 !important; font-size: 0.78rem !important; }
 </style>
 """, unsafe_allow_html=True)
 
 
-# ================== DATA LOADING (OPTIMIZED) ==================
-@st.cache_resource  # This prevents the app from reloading data on every click
-def load_assets():
-    # UPDATED PATHS for Pro Structure
-    movies = pickle.load(open("data/moviess.pkl", "rb"))
-    
-    # Handle split similarity file for GitHub compatibility
-    import os
-    import numpy as np
-    
-    if os.path.exists("data/similarities.pkl"):
-        similarity = pickle.load(open("data/similarities.pkl", "rb"))
-    elif os.path.exists("data/similarities_part1.pkl"):
-        # Load parts and combine
-        part1 = pickle.load(open("data/similarities_part1.pkl", "rb"))
-        part2 = pickle.load(open("data/similarities_part2.pkl", "rb"))
-        # Concatenate using numpy (assuming it's a list or array)
-        if isinstance(part1, list):
-             similarity = part1 + part2
-        else:
-             similarity = np.concatenate((part1, part2), axis=0)
+# ── Data loading ────────────────────────────────────────────────────────────────
+@st.cache_resource
+def load_assets() -> tuple[pd.DataFrame, np.ndarray]:
+    """Load movie metadata and similarity matrix from disk."""
+    movies: pd.DataFrame = pickle.load(open("data/moviess.pkl", "rb"))
+
+    if Path("data/similarities.pkl").exists():
+        similarity: np.ndarray = pickle.load(open("data/similarities.pkl", "rb"))
+    elif Path("data/similarities_part1.pkl").exists():
+        p1 = pickle.load(open("data/similarities_part1.pkl", "rb"))
+        p2 = pickle.load(open("data/similarities_part2.pkl", "rb"))
+        similarity = np.concatenate((p1, p2), axis=0) if not isinstance(p1, list) else p1 + p2
     else:
-        st.error("Similarity data not found (checked .pkl and split parts).")
+        st.error("Similarity data not found in `data/` directory.")
         st.stop()
-        
+
     return movies, similarity
 
 
 try:
     movies, similarity = load_assets()
 except FileNotFoundError:
-    st.error("Data files not found in 'data/' directory. Please check file structure.")
+    st.error("Data files not found in `data/` directory.")
     st.stop()
 
 
-# ================== API & LOGIC ==================
-def fetch_movie_details(title):
-    """Fetches full movie metadata and poster from OMDB"""
-    url = f"https://www.omdbapi.com/?t={title}&apikey={API_KEY}"
+# ── OMDB helpers ────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_movie_details(title: str) -> dict | None:
+    """Fetch full OMDB metadata for a single title. Cached for 1 hour."""
     try:
-        data = requests.get(url).json()
-        if data.get("Response") == "True":
-            return data
-    except:
-        pass
-    return None
+        resp = requests.get(
+            "https://www.omdbapi.com/",
+            params={"t": title, "apikey": API_KEY},
+            timeout=5,
+        ).json()
+        return resp if resp.get("Response") == "True" else None
+    except Exception:
+        return None
 
 
-def recommend(movie_name, num_movies):
-    index = movies[movies["title"] == movie_name].index[0]
-    distances = similarity[index]
+def safe_poster(details: dict | None) -> str:
+    """Return a valid poster URL, falling back to placeholder."""
+    poster = (details or {}).get("Poster", "")
+    return poster if poster not in (None, "N/A", "") else PLACEHOLDER
 
-    # ADVANCED LOGIC: Get 30 similar movies first, then sort by rating
-    movie_list = sorted(list(enumerate(distances)), reverse=True, key=lambda x: x[1])[1:31]
 
-    recommendations = []
-    for i in movie_list:
-        m_data = movies.iloc[i[0]]
-        recommendations.append({
-            'title': m_data.title,
-            'rating': m_data.get('vote_average', 0)
+# ── Recommendation engine ───────────────────────────────────────────────────────
+def recommend(movie_name: str, n: int) -> list[dict]:
+    """
+    Hybrid recommender: blends cosine similarity (60 %) with
+    normalised TMDB vote_average (40 %) over the top-40 similar candidates.
+    Returns a list of dicts with 'title', 'score', 'rating'.
+    """
+    idx: int = movies[movies["title"] == movie_name].index[0]
+    sims: np.ndarray = np.array(similarity[idx])
+
+    # Candidate pool: top 40 by cosine sim (excluding self)
+    top_idxs = np.argsort(sims)[::-1][1:41]
+
+    # Normalise similarity scores within the pool
+    pool_sims = sims[top_idxs]
+    sim_min, sim_max = pool_sims.min(), pool_sims.max()
+    norm_sims = (pool_sims - sim_min) / (sim_max - sim_min + 1e-9)
+
+    # Normalise ratings within the pool
+    ratings = np.array(
+        [movies.iloc[i].get("vote_average", 0) for i in top_idxs], dtype=float
+    )
+    r_min, r_max = ratings.min(), ratings.max()
+    norm_ratings = (ratings - r_min) / (r_max - r_min + 1e-9)
+
+    hybrid_scores = 0.60 * norm_sims + 0.40 * norm_ratings
+
+    # Sort by hybrid score and return top-n
+    ranked = np.argsort(hybrid_scores)[::-1][:n]
+    results: list[dict] = []
+    for rank_i in ranked:
+        movie_idx = top_idxs[rank_i]
+        row = movies.iloc[movie_idx]
+        results.append({
+            "title": row["title"],
+            "rating": round(float(row.get("vote_average", 0)), 1),
+            "score": round(float(hybrid_scores[rank_i]), 3),
         })
-
-    # Sort the similar movies by their ratings (Hybrid approach)
-    top_picks = sorted(recommendations, key=lambda x: x['rating'], reverse=True)[:num_movies]
-
-    names = []
-    posters = []
-    for m in top_picks:
-        details = fetch_movie_details(m['title'])
-        names.append(m['title'])
-        poster = details.get("Poster") if details else None
-        if poster in [None, "N/A", ""]:
-            poster = "https://via.placeholder.com/300x450?text=No+Image"
-        posters.append(poster)
-
-    return names, posters
+    return results
 
 
-import urllib.parse
+# ── UI helpers ──────────────────────────────────────────────────────────────────
+def _card_html(title: str, poster_url: str, rating: float = 0.0, delay_ms: int = 0) -> str:
+    link = f"?movie={urllib.parse.quote(title)}"
+    badge = f'<div class="nw-badge">★ {rating}</div>' if rating else ""
+    return f"""
+    <div class="nw-grid-item" style="animation-delay:{delay_ms}ms">
+      <a href="{link}" target="_self" class="nw-card">
+        <div class="nw-card-inner">
+          <img src="{poster_url}" alt="{title}"
+               onerror="this.src='{PLACEHOLDER}'">
+          {badge}
+        </div>
+        <div class="nw-card-title">{title}</div>
+      </a>
+    </div>"""
 
-# ================== APP STRUCTURE ==================
-# Handle URL parameters for direct linking
+
+def render_grid(items: list[dict]) -> None:
+    """Render a 5-column responsive grid from a list of {title, poster, rating} dicts."""
+    for row_start in range(0, len(items), COLS_PER_ROW):
+        row = items[row_start : row_start + COLS_PER_ROW]
+        cols = st.columns(COLS_PER_ROW, gap="small")
+        for col_i, (col, item) in enumerate(zip(cols, row)):
+            with col:
+                st.markdown(
+                    _card_html(
+                        item["title"],
+                        item["poster"],
+                        item.get("rating", 0.0),
+                        delay_ms=(row_start // COLS_PER_ROW * 60) + col_i * 40,
+                    ),
+                    unsafe_allow_html=True,
+                )
+
+
+# ── Session state defaults ──────────────────────────────────────────────────────
+st.session_state.setdefault("trending_offset", 0)
+st.session_state.setdefault("selected_movie_name", None)
+
+# Sync URL → state
 if "movie" in st.query_params:
     url_movie = st.query_params["movie"]
-    # Ensure it's a valid movie
     if url_movie in movies["title"].values:
-        if 'selected_movie_name' not in st.session_state or st.session_state.selected_movie_name != url_movie:
-            st.session_state.selected_movie_name = url_movie
-            st.session_state.movie_selectbox = url_movie
+        st.session_state["selected_movie_name"] = url_movie
+        st.session_state["movie_selectbox"] = url_movie
 
-if 'trending_offset' not in st.session_state:
-    st.session_state.trending_offset = 0
+# ── Sidebar ─────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.markdown("""
+    <div style='font-family:Playfair Display,serif;font-size:1.1rem;
+                color:#c9a84c;margin-bottom:1.5rem;padding-bottom:0.75rem;
+                border-bottom:1px solid #1c1f26'>
+        Settings
+    </div>""", unsafe_allow_html=True)
 
-if 'selected_movie_name' not in st.session_state:
-    st.session_state.selected_movie_name = None
-
-def set_movie(movie_title):
-    st.session_state.selected_movie_name = movie_title
-    st.session_state.movie_selectbox = movie_title
-
-def go_back():
-    st.session_state.selected_movie_name = None
-    st.query_params.clear()
-
-st.title("NextWatch")
-st.markdown("---")
-
-# Sidebar Controls
-st.sidebar.header("Settings")
-if st.session_state.selected_movie_name:
-    if st.sidebar.button("Back to Trending", use_container_width=True):
-        go_back()
-        st.rerun()
-        
-num_rec = st.sidebar.number_input("Number of Recommendations", min_value=1, max_value=30, value=5)
-
-# Centered Search Bar
-col_spacer1, col_search, col_spacer2 = st.columns([1, 2, 1])
-with col_search:
-    # Safely get index
-    try:
-        val = st.session_state.get("selected_movie_name")
-        default_index = list(movies["title"].values).index(val) if val in movies["title"].values else None
-    except:
-        default_index = None
-
-    selected_movie = st.selectbox(
-        "Type to search for a movie:",
-        movies["title"].values,
-        index=default_index,
-        placeholder="Start typing a movie name...",
-        key="movie_selectbox" 
+    num_rec: int = st.number_input(
+        "Recommendations", min_value=1, max_value=30, value=10
     )
 
-# Sync selection: If user changes selectbox, update state. If state changed by button, selectbox updates via reruns.
-# Note: With URL params processing at top, this sync is still useful for manual selectbox changes.
-if selected_movie != st.session_state.selected_movie_name:
-     st.session_state.selected_movie_name = selected_movie
+    if st.session_state["selected_movie_name"]:
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("← Back to Trending", use_container_width=True):
+            st.session_state["selected_movie_name"] = None
+            st.query_params.clear()
+            st.rerun()
 
-# Also update query param when selection changes (optional but good for sharing)
+# ── Masthead ─────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div class="nw-masthead">
+  <span class="nw-logo">NextWatch</span>
+  <span class="nw-tagline">Your next obsession, curated</span>
+</div>
+""", unsafe_allow_html=True)
+
+# ── Search bar ───────────────────────────────────────────────────────────────────
+_, col_search, _ = st.columns([1, 2, 1])
+with col_search:
+    movie_titles = list(movies["title"].values)
+    current = st.session_state.get("selected_movie_name")
+    default_idx = movie_titles.index(current) if current in movie_titles else None
+
+    selected_movie: str | None = st.selectbox(
+        "Search for a film:",
+        movie_titles,
+        index=default_idx,
+        placeholder="Start typing a title...",
+        key="movie_selectbox",
+    )
+
+# Keep state in sync with manual selectbox change
+if selected_movie != st.session_state["selected_movie_name"]:
+    st.session_state["selected_movie_name"] = selected_movie
+
+# Reflect in URL
 if selected_movie:
     st.query_params["movie"] = selected_movie
-else:
-    if "movie" in st.query_params:
-        del st.query_params["movie"]
+elif "movie" in st.query_params:
+    del st.query_params["movie"]
 
+st.markdown("<div style='margin-bottom:2rem'></div>", unsafe_allow_html=True)
+
+# ── MAIN VIEWS ───────────────────────────────────────────────────────────────────
 if selected_movie:
-    # 1. Show Details of the Searched Movie
-    with st.status("Fetching data...", expanded=False):
-        current_info = fetch_movie_details(selected_movie)
+    # ── Detail panel ──────────────────────────────────────────────────────────
+    with st.spinner(""):
+        info = fetch_movie_details(selected_movie)
 
-    if current_info:
-        with st.container():
-            st.markdown('<div class="detail-container">', unsafe_allow_html=True)
-            col_a, col_b = st.columns([1, 3])
-            with col_a:
-                poster = current_info.get("Poster")
-                if poster in [None, "N/A", ""]:
-                    poster = "https://via.placeholder.com/300x450?text=No+Image"
-                st.image(poster, use_container_width=True)
-            with col_b:
-                st.subheader(f"{selected_movie} ({current_info.get('Year')})")
-                st.write(
-                    f"Rating: {current_info.get('imdbRating')} | Runtime: {current_info.get('Runtime')} | Genre: {current_info.get('Genre')}")
-                st.write(f"**Plot:** {current_info.get('Plot')}")
-                st.write(f"**Director:** {current_info.get('Director')}")
-                st.write(f"**Cast:** {current_info.get('Actors')}")
-                
-                # Trailer Link
-                trailer_url = f"https://www.youtube.com/results?search_query={selected_movie} trailer"
-                st.link_button("Watch Trailer", trailer_url)
-            st.markdown('</div>', unsafe_allow_html=True)
+    if info:
+        poster_url = safe_poster(info)
+        rating = info.get("imdbRating", "—")
+        trailer_url = f"https://www.youtube.com/results?search_query={urllib.parse.quote(selected_movie + ' official trailer')}"
+        genres = [g.strip() for g in info.get("Genre", "").split(",")]
 
-    st.markdown("### Because you liked that, you might love:")
+        st.markdown(f"""
+        <div class="nw-detail">
+            <div class="nw-detail-poster">
+                <img src="{poster_url}" alt="{selected_movie}"
+                     onerror="this.src='{PLACEHOLDER}'">
+            </div>
+            <div class="nw-detail-body">
+                <div class="nw-detail-title">{selected_movie}</div>
+                <div class="nw-detail-meta">
+                    <span>{info.get("Year","")}</span>
+                    <span>·</span>
+                    <span>{info.get("Runtime","")}</span>
+                    <span>·</span>
+                    <span class="nw-chip gold">★ {rating}</span>
+                    {"".join(f'<span class="nw-chip">{g}</span>' for g in genres)}
+                </div>
+                <div class="nw-detail-plot">{info.get("Plot","")}</div>
+                <div class="nw-detail-credits">
+                    <strong>Director</strong> {info.get("Director","—")}<br>
+                    <strong>Cast</strong> {info.get("Actors","—")}
+                </div>
+                <a href="{trailer_url}" target="_blank" class="nw-trailer-btn">
+                    ▶ Watch Trailer
+                </a>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
 
-    # 2. Get and Show Recommendations
-    names, posters = recommend(selected_movie, num_rec)
-    
-    # Grid display for recommendations (Row-based for alignment)
-    for i in range(0, len(names), 5):
-        row_cols = st.columns(5, gap="medium")
-        for j, col in enumerate(row_cols):
-            if i + j < len(names):
-                with col:
-                    poster_url = posters[i+j]
-                    if poster_url in [None, "N/A", ""]:
-                        poster_url = "https://via.placeholder.com/300x450?text=No+Image"
-                        
-                    title = names[i+j]
-                    link = f"?movie={urllib.parse.quote(title)}"
-                    st.markdown(f"""
-                        <a href="{link}" target="_self" style="text-decoration: none; color: inherit;">
-                            <div class="movie-card">
-                                <img class="movie-img" src="{poster_url}" alt="{title}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300x450?text=No+Image';">
-                                <div class="movie-title">{title}</div>
-                            </div>
-                        </a>
-                    """, unsafe_allow_html=True)
+    # ── Recommendations ────────────────────────────────────────────────────────
+    st.markdown(
+        '<div class="nw-section">Because you watched this</div>',
+        unsafe_allow_html=True,
+    )
+
+    recs = recommend(selected_movie, num_rec)
+    grid_items = []
+    for rec in recs:
+        details = fetch_movie_details(rec["title"])
+        grid_items.append({
+            "title": rec["title"],
+            "poster": safe_poster(details),
+            "rating": rec["rating"],
+        })
+
+    render_grid(grid_items)
 
 else:
-    # Default: Show Trending Movies
-    # Align header and button vertically
-    col_t1, col_t2 = st.columns([5, 1], gap="small")
-    with col_t1:
-        st.markdown("<h3 style='margin-top: 5px; margin-bottom: 20px;'>Trending Now</h3>", unsafe_allow_html=True)
-    with col_t2:
-        st.markdown("<div style='margin-top: 5px;'></div>", unsafe_allow_html=True)
-        if st.button("Refresh", use_container_width=True):
-            st.session_state.trending_offset += 10
+    # ── Trending view ──────────────────────────────────────────────────────────
+    hdr_col, btn_col = st.columns([6, 1], gap="small")
+    with hdr_col:
+        st.markdown('<div class="nw-section">Trending Now</div>', unsafe_allow_html=True)
+    with btn_col:
+        if st.button("Refresh ↻", use_container_width=True):
+            st.session_state["trending_offset"] += COLS_PER_ROW * 2
             st.rerun()
-    
-    # Get top movies with offset
-    if 'vote_average' in movies.columns:
-        # Sort by rating and take a slice based on offset
-        sorted_movies = movies.sort_values(by='vote_average', ascending=False)
-        start_idx = st.session_state.trending_offset % (len(sorted_movies) - 10) # Loop around
-        trending_movies = sorted_movies.iloc[start_idx : start_idx + 10]
-    else:
-        # Just take a slice
-        start_idx = st.session_state.trending_offset % (len(movies) - 10)
-        trending_movies = movies.iloc[start_idx : start_idx + 10]
-        
-    trending_titles = trending_movies['title'].tolist()
-    
-    # Grid display for trending (Row-based for alignment)
-    for i in range(0, len(trending_titles), 5):
-        row_cols = st.columns(5, gap="medium")
-        for j, col in enumerate(row_cols):
-            if i + j < len(trending_titles):
-                with col:
-                    title = trending_titles[i+j]
-                    details = fetch_movie_details(title)
-                    poster_url = details.get("Poster") if details else "https://via.placeholder.com/300x450"
-                    
-                    # Handle N/A posters explicitly
-                    if poster_url in [None, "N/A", ""]:
-                        poster_url = "https://via.placeholder.com/300x450?text=No+Image"
-                    
-                    link = f"?movie={urllib.parse.quote(title)}"
-                    st.markdown(f"""
-                        <a href="{link}" target="_self" style="text-decoration: none; color: inherit;">
-                            <div class="movie-card">
-                                <img class="movie-img" src="{poster_url}" alt="{title}" onerror="this.onerror=null;this.src='https://via.placeholder.com/300x450?text=No+Image';">
-                                <div class="movie-title">{title}</div>
-                            </div>
-                        </a>
-                    """, unsafe_allow_html=True)
 
-# Footer
-st.markdown("<br><br><div style='text-align: center; color: #8b949e; font-size: 0.8rem;'>Designed for Professional Portfolio | 2026</div>", 
-            unsafe_allow_html=True)
+    # Pick 10 movies from a rotating slice of top-rated titles
+    sorted_movies = (
+        movies.sort_values("vote_average", ascending=False)
+        if "vote_average" in movies.columns
+        else movies
+    )
+    total = len(sorted_movies)
+    offset = st.session_state["trending_offset"] % max(total - 10, 1)
+    trending_titles: list[str] = sorted_movies.iloc[offset : offset + 10]["title"].tolist()
+
+    grid_items = []
+    for title in trending_titles:
+        details = fetch_movie_details(title)
+        rating = float(
+            movies.loc[movies["title"] == title, "vote_average"].values[0]
+            if "vote_average" in movies.columns and title in movies["title"].values
+            else 0
+        )
+        grid_items.append({
+            "title": title,
+            "poster": safe_poster(details),
+            "rating": round(rating, 1),
+        })
+
+    render_grid(grid_items)
+
+# ── Footer ────────────────────────────────────────────────────────────────────────
+st.markdown("""
+<div style='text-align:center;color:#2a2a24;font-size:0.72rem;
+            letter-spacing:0.12em;text-transform:uppercase;
+            margin-top:4rem;padding-top:1.5rem;border-top:1px solid #1c1f26'>
+    NextWatch · Portfolio Project · 2026
+</div>
+""", unsafe_allow_html=True)
