@@ -348,10 +348,75 @@ def safe_poster(details: dict | None) -> str:
 
 
 # ── Recommendation engine ───────────────────────────────────────────────────────
+
+# ── BUG FIX 2 (helper): franchise / sequel detection ──────────────────────────
+# ROOT CAUSE: recommend() ranked all 40 candidates by a uniform hybrid score
+# with no sequel-awareness.  A title like "Avatar: The Way of Water" competed
+# against high-rated unrelated films on equal footing and was often buried.
+#
+# FIX: detect franchise siblings using title-prefix matching and suffix
+# stripping, then partition the scored results so franchise entries always
+# appear first (still ordered among themselves by hybrid score).
+import re as _re
+
+def _franchise_base(title: str) -> str:
+    """
+    Strip trailing numeric suffixes and part/chapter/volume labels to expose
+    the franchise root.  E.g. "Iron Man 3" → "iron man", "Avatar 2" → "avatar".
+    """
+    t = title.lower().strip()
+    # Remove ": anything" subtitles only when preceded by a known sequel marker
+    t = _re.sub(
+        r'[\s:–\-]+(?:part|chapter|vol(?:ume)?|episode)?\s*'
+        r'(?:\d+|[ivxlcdm]{1,6})\s*$',
+        '', t, flags=_re.IGNORECASE,
+    ).strip()
+    return t
+
+
+def _is_franchise_match(source: str, candidate: str) -> bool:
+    """
+    Return True when candidate is a sequel, prequel, or part of the same
+    franchise as source — but is NOT the same film.
+
+    Covers patterns like:
+      source="Avatar"       candidate="Avatar 2"                → True
+      source="Avatar"       candidate="Avatar: The Way of Water" → True
+      source="The Dark Knight" candidate="The Dark Knight Rises" → True
+      source="Alien"        candidate="Aliens"                   → True  (prefix)
+      source="Iron Man 3"   candidate="Iron Man"                 → True  (prequel)
+      source="Interstellar" candidate="Inception"                → False
+    """
+    src  = source.lower().strip()
+    cand = candidate.lower().strip()
+    if src == cand:
+        return False  # same movie — never a "sequel" of itself
+
+    # Prefix match: one title is a leading substring of the other
+    # (handles "Avatar" / "Avatar 2", "Alien" / "Aliens", etc.)
+    if cand.startswith(src) or src.startswith(cand):
+        return True
+
+    # Stripped-base match: both reduce to the same root after removing
+    # trailing numeric/part suffixes (handles "Iron Man" / "Iron Man 3")
+    src_base  = _franchise_base(src)
+    cand_base = _franchise_base(cand)
+    # Only fire when at least one title *actually changed* after stripping
+    # (prevents false positives where no suffix was present)
+    if src_base and cand_base == src_base and (src_base != src or src_base != cand):
+        return True
+
+    return False
+
+
 def recommend(movie_name: str, n: int) -> list[dict]:
     """
     Hybrid recommender: blends cosine similarity (60 %) with
     normalised TMDB vote_average (40 %) over the top-40 similar candidates.
+
+    Sequel/franchise entries are promoted to the front of the results list
+    regardless of their hybrid score (Bug 2 fix).
+
     Returns a list of dicts with 'title', 'score', 'rating'.
     """
     idx: int = movies[movies["title"] == movie_name].index[0]
@@ -374,18 +439,31 @@ def recommend(movie_name: str, n: int) -> list[dict]:
 
     hybrid_scores = 0.60 * norm_sims + 0.40 * norm_ratings
 
-    # Sort by hybrid score and return top-n
-    ranked = np.argsort(hybrid_scores)[::-1][:n]
-    results: list[dict] = []
+    # Build full result list sorted by hybrid score
+    ranked = np.argsort(hybrid_scores)[::-1]  # all 40, best-first
+    all_results: list[dict] = []
     for rank_i in ranked:
         movie_idx = top_idxs[rank_i]
         row = movies.iloc[movie_idx]
-        results.append({
+        all_results.append({
             "title": row["title"],
             "rating": round(float(row.get("vote_average", 0)), 1),
             "score": round(float(hybrid_scores[rank_i]), 3),
         })
-    return results
+
+    # ── BUG FIX 2: promote sequels / franchise entries to the top ──────────────
+    # Partition into franchise siblings vs. unrelated films.  Each bucket retains
+    # its internal hybrid-score ordering so the best sequel still leads the group.
+    franchise: list[dict] = []
+    others:    list[dict] = []
+    for item in all_results:
+        if _is_franchise_match(movie_name, item["title"]):
+            franchise.append(item)
+        else:
+            others.append(item)
+
+    # Franchise entries first, then the rest — slice to n
+    return (franchise + others)[:n]
 
 
 # ── UI helpers ──────────────────────────────────────────────────────────────────
@@ -427,12 +505,25 @@ def render_grid(items: list[dict]) -> None:
 st.session_state.setdefault("trending_offset", 0)
 st.session_state.setdefault("selected_movie_name", None)
 
-# Sync URL → state
+# ── BUG FIX 1: URL → state sync (one-shot per navigation event) ────────────────
+# ROOT CAUSE: the original sync fired unconditionally on EVERY rerun. Because
+# st.session_state["movie_selectbox"] is written BEFORE st.selectbox() is
+# called, any user input typed into the search box was silently overwritten by
+# the stale URL param (?movie=Avatar) on the very next rerun — snapping the
+# display back to Avatar regardless of what the user typed.
+#
+# FIX: track the last URL value we already consumed in `_last_url_movie`.
+# We only write to the widget state when the URL param carries a NEW value we
+# haven't processed yet (i.e. a genuine card-click navigation).  Once consumed,
+# `_last_url_movie` is updated so subsequent reruns leave the widget alone.
 if "movie" in st.query_params:
     url_movie = st.query_params["movie"]
-    if url_movie in movies["title"].values:
+    if (url_movie in movies["title"].values
+            and url_movie != st.session_state.get("_last_url_movie")):
+        # New navigation event detected — apply it exactly once
         st.session_state["selected_movie_name"] = url_movie
         st.session_state["movie_selectbox"] = url_movie
+        st.session_state["_last_url_movie"] = url_movie  # mark as consumed
 
 # ── Sidebar ─────────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -477,9 +568,12 @@ with col_search:
         key="movie_selectbox",
     )
 
-# Keep state in sync with manual selectbox change
+# Keep state in sync with manual selectbox change.
+# Also update _last_url_movie so the URL-sync guard (Bug 1 fix) correctly
+# treats the upcoming URL update as "already consumed" and does not re-fire.
 if selected_movie != st.session_state["selected_movie_name"]:
     st.session_state["selected_movie_name"] = selected_movie
+    st.session_state["_last_url_movie"] = selected_movie  # prevent false re-nav
 
 # Reflect in URL
 if selected_movie:
